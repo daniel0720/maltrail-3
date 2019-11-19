@@ -70,7 +70,7 @@ def update_trails(force=False, offline=False):
     """
 
     success = False
-    trails = {}
+    trails = {}             # 存放trail字典，key是trail，value是__info__和__reference__
     duplicates = {}
 
     try:
@@ -81,6 +81,7 @@ def update_trails(force=False, offline=False):
     
     _chown(USERS_DIR)
 
+    # 如果配置了trails更新服务器，就从更新服务器获取trail
     if config.UPDATE_SERVER:    # 如果配置了trails更新服务器，则从服务器读取trails并写入到TRAILS_FILE文件
         print("[i] retrieving trails from provided 'UPDATE_SERVER' server...")
         content = retrieve_content(config.UPDATE_SERVER)
@@ -91,6 +92,7 @@ def update_trails(force=False, offline=False):
                 f.write(content)
             trails = load_trails()
 
+    # 没有配置trails更新服务器，就从当前文件中读取trails
     else:
         trail_files = set()     # 存放trails文件夹下的trails文件路径和名称
         for dirpath, dirnames, filenames in os.walk(os.path.abspath(os.path.join(ROOT_DIR, "trails"))):
@@ -173,4 +175,69 @@ def update_trails(force=False, offline=False):
                     pass
             
             # custom trails from remote location
-            
+            if config.CUSTOM_TRAILS_URL:
+                print(" [o] '(remote custom)'{}".format(" " * 20))
+                for url in re.split(r"[;,]", config.CUSTOM_TRAILS_URL):
+                    url = url.strip()
+                    if not url:
+                        continue
+
+                    url = ("http://{}".format(url)) if not "//" in url else url
+                    content = retrieve_content(url)
+
+                    if not content:
+                        print("[x] unable to retrieve data (or empty response) from '{}'".format(url))
+                    else:
+                        __info__ = "blacklisted"
+                        __reference__ = "(remote custom)"   # urlparse.urlsplit(url).netloc
+                        for line in content.split('\n'):
+                            line = line.strip()
+                            if not line or line.startswith('#'):        # #开始的行是注释行，跳过注释行和空行
+                                continue
+                            line = re.sub(r"\s*#.*", "", line)          # 去掉行中的注释部分
+                            if '://' in line:                           # 此行为域名，取域名部分
+                                line = re.search(r"://(.*)", line).group(1)
+                            line = line.rstrip('/')
+
+                            if line in trails and any(_ in trails[line][1] for _ in ("custom", "static")):      # 在trails中已经有了本条目，调到下一条循环
+                                continue
+
+                            if '/' in line:                             # 取域名部分或者IP网络号
+                                trails[line] = (__info__, __reference__)
+                                line = line.split('/')[0]
+                            elif re.search(r"\A\d+\.\d+\.\d+\.\d+\Z", line):    # line为IP
+                                trails[line] = (__info__, __reference__)
+                            else:
+                                trails[line.strip('.')] = (__info__, __reference__)
+                        
+                        for match in re.finditer(r"(\d+\.\d+\.\d+\.\d+)/(\d+)", content):
+                            prefix, mask = match.groups()
+                            mask = int(mask)
+                            if mask > 32:
+                                continue
+                            start_int = addr_to_int(prefix) & make_mask(mask)
+                            end_int = start_int | ((1 << 32 - mask) - 1)
+                            if 0 <= end_int - start_int <= 1024:
+                                address = start_int
+                                while start_int <= address <= end_int:
+                                    trails[int_to_addr(address)] = (__info__, __reference__)
+                                    address += 1
+                        
+            # basic cleanup
+            for key in trails.keys():
+                if key not in trails:
+                    continue
+                if config.DISABLED_TRAILS_INFO_REGEX:
+                    if re.search(config.DISABLED_TRAILS_INFO_REGEX, trails[key][0]):
+                        del trails[key]
+                        continue
+                
+                try:
+                    _key = key.decode("utf8").encode("idna")
+                    if _key != key:
+                        trails[_key] = trails[key]
+                        del trails[key]
+                        key = _key
+                except:
+                    pass
+
